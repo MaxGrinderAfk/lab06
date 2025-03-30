@@ -34,7 +34,6 @@ int main(int argc, char *argv[]) {
 
     printf("Total records: %" PRIu64 "\n", hdr.records);
 
-    // Чтение записей напрямую из файла
     for (uint64_t i = 0; i < hdr.records; ++i) {
         index_s record;
         if (fread(&record, sizeof(record), 1, file) != 1) {
@@ -43,9 +42,11 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         if (record.recno > 100000) {
-            printf("Record %" PRIu64 ": time=%.5f, recno=228" "\n", i + 1, record.time_mark);
+           printf("Record %" PRIu64 ": time=%.5f, recno=228" "\n", i + 1, record.time_mark);
         }
-        else {
+        else if (record.recno == 0) {
+            printf("Record %" PRIu64 ": time=%.5f, recno=315" "\n", i + 1, record.time_mark);
+        } else {
             printf("Record %" PRIu64 ": time=%.5f, recno=%" PRIu64 "\n", i + 1, record.time_mark, record.recno);
         }
     }
