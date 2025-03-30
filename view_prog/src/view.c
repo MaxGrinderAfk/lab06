@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 typedef struct {
     double time_mark;
