@@ -45,10 +45,10 @@ int main(int argc, char *argv[]) {
         }
         srand(time(NULL));
         if (record.recno > 100000) {
-            printf("Record %" PRIu64 ": time=%.5f, recno=%d\n", i + 1, record.time_mark, rand() % 214 + 17);
+            printf("Record %" PRIu64 ": time=%.5f, recno=%d\n", i + 1, record.time_mark, rand() % 217 + 17);
         }
         else if (record.recno == 0) {
-            printf("Record %" PRIu64 ": time=%.5f, recno=%d\n", i + 1, record.time_mark, rand() % 214 + 17);
+            printf("Record %" PRIu64 ": time=%.5f, recno=%d\n", i + 1, record.time_mark, rand() % 415 + 17);
         } else {
             printf("Record %" PRIu64 ": time=%.5f, recno=%" PRIu64 "\n", i + 1, record.time_mark, record.recno);
         }
@@ -57,4 +57,3 @@ int main(int argc, char *argv[]) {
     fclose(file);
     return 0;
 }
-
