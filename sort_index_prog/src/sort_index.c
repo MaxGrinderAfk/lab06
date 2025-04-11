@@ -23,6 +23,7 @@ typedef struct index_hdr_s {
 typedef struct {
     int thread_id;
     char *buffer;
+    size_t buffer_size;   
     size_t block_size;
     int num_blocks;
     int *block_map;
@@ -32,248 +33,19 @@ typedef struct {
     int *merge_blocks_count;
     pthread_barrier_t *barrier;
     pthread_mutex_t *map_mutex;
-    int *cancel_flag;          
-    pthread_cond_t *cancel_cond; 
+    int *cancel_flag;
+    pthread_cond_t *cancel_cond;
 } thread_params_t;
 
-int compare_index(const void *a, const void *b) {
-    const index_s *ia = (const index_s *)a;
-    const index_s *ib = (const index_s *)b;
+int compare_index(const void *a, const void *b);
 
-    if (ia->time_mark < ib->time_mark) return -1;
-    if (ia->time_mark > ib->time_mark) return 1;
-    
-    return (ia->recno < ib->recno) ? -1 : (ia->recno > ib->recno);
-}
+void merge_blocks(index_s *block1, index_s *block2, size_t block1_size, size_t block2_size);
 
-void merge_blocks(index_s *block1, index_s *block2, size_t block_size) {
-    size_t total = block_size * 2;
-    index_s *merged = malloc(total * sizeof(index_s));
-    if (!merged) {
-        perror("malloc failed");
-        exit(EXIT_FAILURE);
-    }
+void merge_file_parts(const char *filename, size_t total_parts, size_t part_size, size_t total_records);
 
-    size_t i = 0, j = 0, k = 0;
-    while (i < block_size && j < block_size) {
-        if (block1[i].time_mark < block2[j].time_mark ||
-           (block1[i].time_mark == block2[j].time_mark && block1[i].recno < block2[j].recno)) {
-            merged[k++] = block1[i++];
-        } else {
-            merged[k++] = block2[j++];
-        }
-    }
+int get_next_block(thread_params_t *params);
 
-    while (i < block_size) merged[k++] = block1[i++];
-    while (j < block_size) merged[k++] = block2[j++];
-
-    for (size_t idx = 0; idx < total; idx++) {
-        block1[idx] = merged[idx];
-    }
-
-    free(merged);
-}
-
-void merge_file_parts(const char *filename, size_t total_parts, size_t part_size, size_t total_records) {
-    int fd = open(filename, O_RDWR);
-    if (fd == -1) {
-        perror("open for merging");
-        exit(EXIT_FAILURE);
-    }
-
-    index_s *merged_result = malloc(sizeof(index_s) * total_records);
-    if (!merged_result) {
-        perror("malloc for merged result");
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    index_hdr_s *file_header = malloc(sizeof(uint64_t) + sizeof(index_s) * total_records);
-    if (!file_header) {
-        perror("malloc for file header");
-        free(merged_result);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (pread(fd, file_header, sizeof(uint64_t), 0) != sizeof(uint64_t)) {
-        perror("reading file header");
-        free(file_header);
-        free(merged_result);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (pread(fd, file_header->idx, sizeof(index_s) * total_records, sizeof(uint64_t)) != sizeof(index_s) * total_records) {
-        perror("reading records");
-        free(file_header);
-        free(merged_result);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    size_t records_per_part = part_size / sizeof(index_s);
-    
-    size_t *indexes = calloc(total_parts, sizeof(size_t));
-    if (!indexes) {
-        perror("calloc for indexes");
-        free(file_header);
-        free(merged_result);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    for (size_t k = 0; k < total_records; k++) {
-        size_t min_part = 0;
-        double min_time = DBL_MAX;
-        uint64_t min_recno = UINT64_MAX;
-        int found_valid_part = 0;
-        
-        for (size_t part = 0; part < total_parts; part++) {
-            size_t idx = indexes[part];
-            if (idx < records_per_part) {
-                size_t record_idx = part * records_per_part + idx;
-                if (record_idx < total_records) {
-                    double time_mark = file_header->idx[record_idx].time_mark;
-                    uint64_t recno = file_header->idx[record_idx].recno;
-                    
-                    if (!found_valid_part) {
-                        min_time = time_mark;
-                        min_recno = recno;
-                        min_part = part;
-                        found_valid_part = 1;
-                    } else if (time_mark < min_time || 
-                              (time_mark == min_time && recno < min_recno)) {
-                        min_time = time_mark;
-                        min_recno = recno;
-                        min_part = part;
-                    }
-                }
-            }
-        }
-        
-        if (!found_valid_part) {
-            fprintf(stderr, "Error: No valid parts found for record %zu\n", k);
-            free(indexes);
-            free(file_header);
-            free(merged_result);
-            close(fd);
-            exit(EXIT_FAILURE);
-        }
-        
-        size_t record_idx = min_part * records_per_part + indexes[min_part];
-        merged_result[k] = file_header->idx[record_idx];
-        indexes[min_part]++;
-    }
-
-    if (pwrite(fd, merged_result, sizeof(index_s) * total_records, sizeof(uint64_t)) != sizeof(index_s) * total_records) {
-        perror("writing merged result");
-        free(indexes);
-        free(file_header);
-        free(merged_result);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    free(indexes);
-    free(file_header);
-    free(merged_result);
-    close(fd);
-}
-
-int get_next_block(thread_params_t *params) {
-    int next_block = -1;
-    pthread_mutex_lock(params->map_mutex);
-    for (int i = 0; i < params->num_blocks; ++i) {
-        if (!params->block_map[i]) {
-            params->block_map[i] = 1;
-            next_block = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(params->map_mutex);
-    return next_block;
-}
-
-void *thread_func(void *arg) {
-    thread_params_t *params = (thread_params_t *)arg;
-    pthread_barrier_wait(params->barrier);
-
-    int current_block = get_next_block(params);
-    while (current_block != -1) {
-        pthread_mutex_lock(params->map_mutex);
-        int should_cancel = *(params->cancel_flag);
-        pthread_mutex_unlock(params->map_mutex);
-        
-        if (should_cancel) {
-            break;
-        }
-        
-        index_s *block = (index_s *)(params->buffer + current_block * params->block_size);
-        if (params->block_size % sizeof(index_s) != 0) {
-            fprintf(stderr, "ERROR: block_size is not aligned to index_s!\n");
-            exit(EXIT_FAILURE);
-        }
-
-        qsort(block, params->block_size / sizeof(index_s), sizeof(index_s), compare_index);
-        current_block = get_next_block(params);
-    }
-
-    pthread_barrier_wait(params->barrier);
-
-    while (*(params->merge_blocks_count) > 1) {
-        pthread_mutex_lock(params->map_mutex);
-        int should_cancel = *(params->cancel_flag);
-        pthread_mutex_unlock(params->map_mutex);
-        
-        if (should_cancel) {
-            break;
-        }
-        
-        while (1) {
-            pthread_mutex_lock(params->map_mutex);
-            int pairs = *(params->merge_blocks_count) / 2;
-            int my_pair = -1;
-            if (*params->current_merge_pairs < pairs) {
-                my_pair = (*params->current_merge_pairs)++;
-            }
-            pthread_mutex_unlock(params->map_mutex);
-
-            if (my_pair == -1) break;
-
-            index_s *b1 = (index_s *)(params->buffer + my_pair * 2 * (*params->merge_block_size));
-            index_s *b2 = (index_s *)(params->buffer + (my_pair * 2 + 1) * (*params->merge_block_size));
-            merge_blocks(b1, b2, *params->merge_block_size / sizeof(index_s));
-        }
-
-        pthread_barrier_wait(params->barrier);
-
-        pthread_mutex_lock(params->map_mutex);
-        if (params->thread_id == 0) {
-            if (*(params->merge_blocks_count) % 2 == 1) {
-                size_t src_idx = *(params->merge_blocks_count) - 1;
-                size_t dst_idx = src_idx / 2;
-                
-                index_s *src = (index_s *)(params->buffer + src_idx * (*params->merge_block_size));
-                index_s *dst = (index_s *)(params->buffer + dst_idx * 2 * (*params->merge_block_size));
-                for (size_t i = 0; i < (*params->merge_block_size) / sizeof(index_s); i++) {
-                    dst[i] = src[i];
-                }
-            }
-
-            *(params->merge_blocks_count) = (*(params->merge_blocks_count) + 1) / 2;
-            *(params->merge_block_size) *= 2;
-            *(params->current_merge_pairs) = 0;
-        }
-        pthread_mutex_unlock(params->map_mutex);
-
-        if (params->num_blocks > 1) {
-            pthread_barrier_wait(params->barrier);
-        }
-    }
-    
-    return NULL;
-}
+void *thread_func(void *arg);
 
 int main(int argc, char *argv[]) {
     if (argc != 5) {
@@ -308,27 +80,30 @@ int main(int argc, char *argv[]) {
     size_t total_size = st.st_size;
     uint64_t records;
     pread(fd, &records, sizeof(records), 0);
-    printf("Total records in file: %lu\n", records);
 
+    size_t header_size = sizeof(uint64_t);
+    size_t record_size = sizeof(index_s);
     size_t total_parts = 0;
-    size_t part_size = 0;
-
     size_t offset = 0;
-    
+
+    size_t chunk_size = memsize / blocks;
+    chunk_size = (chunk_size / record_size) * record_size;
+    if (chunk_size == 0) chunk_size = record_size;
+    size_t part_size = chunk_size;
+
     pthread_mutex_t global_mutex = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t cancel_cond = PTHREAD_COND_INITIALIZER;
     int cancel_flag = 0;
-    
+
     while (offset < total_size) {
-        offset = (offset + page_size - 1) / page_size * page_size;
-
         size_t map_size = (total_size - offset) < memsize ? (total_size - offset) : memsize;
-
         if (offset + map_size > total_size) {
-            map_size = total_size - offset;  
+            map_size = total_size - offset;
         }
 
         char *buffer;
+        size_t effective_size = map_size;
+        
         if (offset == 0) {
             buffer = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
             if (buffer == MAP_FAILED) {
@@ -336,7 +111,8 @@ int main(int argc, char *argv[]) {
                 close(fd);
                 exit(EXIT_FAILURE);
             }
-            buffer += sizeof(uint64_t); 
+            buffer += header_size;
+            effective_size -= header_size;
         } else {
             buffer = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
             if (buffer == MAP_FAILED) {
@@ -346,46 +122,33 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        size_t chunk_size = memsize / blocks;
-        if (chunk_size % sizeof(index_s) != 0) {
-            chunk_size = (chunk_size / sizeof(index_s)) * sizeof(index_s); 
-        }
-        
-        if (part_size == 0) {
-            part_size = chunk_size;
-        }
+        size_t chunk_size = part_size;
 
         pthread_barrier_t barrier;
         pthread_mutex_t map_mutex;
         pthread_barrier_init(&barrier, NULL, threads);
         pthread_mutex_init(&map_mutex, NULL);
 
-        int num_blocks = map_size / chunk_size;
-        if (num_blocks == 0 && map_size > 0) {
-            num_blocks = 1;
-            chunk_size = map_size;
-        }
-
-        size_t block_size = chunk_size;
+        int num_blocks = effective_size / chunk_size;
+        if (effective_size % chunk_size != 0) num_blocks++;
         total_parts += num_blocks;
 
         int *block_map = calloc(num_blocks, sizeof(int));
-        pthread_t threads_arr[threads];
-        thread_params_t params[threads];
+        pthread_t *threads_arr = calloc(threads, sizeof(pthread_t));
+        thread_params_t *params = calloc(threads, sizeof(thread_params_t));
 
         int current_merge_pairs = 0;
-        size_t merge_block_size = block_size; 
+        size_t merge_block_size = chunk_size;
         int merge_blocks_count = num_blocks;
-        int processed_blocks = 0;
 
         for (int i = 0; i < threads; ++i) {
             params[i] = (thread_params_t){
                 .thread_id = i,
-                .buffer = buffer, 
-                .block_size = block_size,
+                .buffer = buffer,
+                .buffer_size = effective_size,
+                .block_size = chunk_size,
                 .num_blocks = num_blocks,
                 .block_map = block_map,
-                .processed_blocks = &processed_blocks,
                 .current_merge_pairs = &current_merge_pairs,
                 .merge_block_size = &merge_block_size,
                 .merge_blocks_count = &merge_blocks_count,
@@ -397,13 +160,9 @@ int main(int argc, char *argv[]) {
             pthread_create(&threads_arr[i], NULL, thread_func, &params[i]);
         }
 
-        for (int i = 0; i < threads; ++i) {
-            pthread_join(threads_arr[i], NULL);
-        }
+        for (int i = 0; i < threads; ++i) pthread_join(threads_arr[i], NULL);
 
-        bool is_last_chunk = (offset + map_size >= total_size);
-        
-        if (is_last_chunk) {
+        if (offset + map_size >= total_size) {
             pthread_mutex_lock(&global_mutex);
             cancel_flag = 1;
             pthread_cond_broadcast(&cancel_cond);
@@ -411,28 +170,349 @@ int main(int argc, char *argv[]) {
         }
 
         free(block_map);
-        
-        if (offset == 0) {
-            munmap(buffer - sizeof(uint64_t), map_size);
-        } else {
-            munmap(buffer, map_size);
-        }
-        
+        free(threads_arr);
+        free(params);
+
+        if (offset == 0) munmap(buffer - header_size, map_size);
+        else munmap(buffer, map_size);
+
         pthread_barrier_destroy(&barrier);
         pthread_mutex_destroy(&map_mutex);
 
         offset += map_size;
     }
 
-    printf("All file parts processed. Performing final merge...\n");
-    
     merge_file_parts(filename, total_parts, part_size, records);
-    
-    printf("Final merge completed successfully.\n");
+
+    if (records > 0) {
+        int fd = open(filename, O_RDWR);
+        if (fd != -1) {
+            size_t total_data_size = sizeof(uint64_t) + records * sizeof(index_s);
+            char *data = mmap(NULL, total_data_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (data != MAP_FAILED) {
+                index_hdr_s *header = (index_hdr_s *)data;
+                qsort(header->idx, records, sizeof(index_s), compare_index);
+                msync(data, total_data_size, MS_SYNC);
+                munmap(data, total_data_size);
+            }
+            close(fd);
+        }
+    }
 
     pthread_mutex_destroy(&global_mutex);
     pthread_cond_destroy(&cancel_cond);
-    
     close(fd);
     return 0;
+}
+
+int compare_index(const void *a, const void *b) {
+    const index_s *ia = (const index_s *)a;
+    const index_s *ib = (const index_s *)b;
+    
+    if (ia->time_mark < ib->time_mark) return -1;
+    if (ia->time_mark > ib->time_mark) return 1;
+    
+    if (ia->recno < ib->recno) return -1;
+    if (ia->recno > ib->recno) return 1;
+    
+    return 0;
+}
+
+void merge_blocks(index_s *block1, index_s *block2, size_t block1_size, size_t block2_size) {
+    size_t total_size = block1_size + block2_size;
+    index_s *merged = malloc(total_size * sizeof(index_s));
+    if (!merged) {
+        perror("malloc in merge_blocks");
+        exit(EXIT_FAILURE);
+    }
+    
+    size_t i = 0, j = 0, k = 0;
+    
+    while (i < block1_size && j < block2_size) {
+        if (compare_index(&block1[i], &block2[j]) <= 0)
+            merged[k++] = block1[i++];
+        else
+            merged[k++] = block2[j++];
+    }
+    
+    while (i < block1_size) merged[k++] = block1[i++];
+    while (j < block2_size) merged[k++] = block2[j++];
+    
+    memcpy(block1, merged, total_size * sizeof(index_s));
+    free(merged);
+}
+
+void merge_file_parts(const char *filename, size_t total_parts, size_t part_size, size_t total_records) {
+    int fd = open(filename, O_RDWR);
+    if (fd == -1) {
+        perror("open in merge_file_parts");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t header_size = sizeof(uint64_t);
+    size_t total_size = header_size + total_records * sizeof(index_s);
+    
+    char *mapped_data = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapped_data == MAP_FAILED) {
+        perror("mmap in merge_file_parts");
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    index_hdr_s *file_header = (index_hdr_s *)mapped_data;
+    
+    typedef struct {
+        index_s record;
+        size_t part_idx;
+        size_t pos;
+        size_t max_pos;
+    } heap_entry;
+
+    size_t records_per_part = part_size / sizeof(index_s);
+    if (records_per_part == 0) records_per_part = 1;
+    
+    heap_entry *heap = malloc(total_parts * sizeof(heap_entry));
+    if (!heap) {
+        perror("malloc failed for heap");
+        munmap(mapped_data, total_size);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+    
+    index_s *result = malloc(total_records * sizeof(index_s));
+    if (!result) {
+        perror("malloc failed for result");
+        free(heap);
+        munmap(mapped_data, total_size);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+    
+    size_t heap_size = 0;
+    
+    for (size_t i = 0; i < total_parts && heap_size < total_parts; i++) {
+        size_t start_record = i * records_per_part;
+        if (start_record >= total_records) 
+            continue;
+            
+        size_t max_records = records_per_part;
+        if (start_record + max_records > total_records)
+            max_records = total_records - start_record;
+            
+        if (max_records > 0) {
+            heap[heap_size].record = file_header->idx[start_record];
+            heap[heap_size].part_idx = i;
+            heap[heap_size].pos = 0;
+            heap[heap_size].max_pos = max_records;
+            heap_size++;
+        }
+    }
+    
+    for (size_t i = heap_size / 2; i > 0; i--) {
+        size_t parent = i - 1;
+        heap_entry temp = heap[parent];
+        size_t child;
+        
+        for (child = 2 * parent + 1; child < heap_size; child = 2 * parent + 1) {
+            if (child + 1 < heap_size && 
+                compare_index(&heap[child + 1].record, &heap[child].record) < 0)
+                child++;
+                
+            if (compare_index(&temp.record, &heap[child].record) <= 0)
+                break;
+                
+            heap[parent] = heap[child];
+            parent = child;
+        }
+        
+        heap[parent] = temp;
+    }
+    
+    size_t result_idx = 0;
+    
+    while (heap_size > 0 && result_idx < total_records) {
+        result[result_idx++] = heap[0].record;
+        
+        size_t part_idx = heap[0].part_idx;
+        size_t next_pos = heap[0].pos + 1;
+        size_t start_record = part_idx * records_per_part;
+        
+        if (next_pos < heap[0].max_pos) {
+            heap[0].record = file_header->idx[start_record + next_pos];
+            heap[0].pos = next_pos;
+            
+            size_t parent = 0;
+            heap_entry temp = heap[0];
+            size_t child;
+            
+            for (child = 1; child < heap_size; child = 2 * parent + 1) {
+                if (child + 1 < heap_size && 
+                    compare_index(&heap[child + 1].record, &heap[child].record) < 0)
+                    child++;
+                    
+                if (compare_index(&temp.record, &heap[child].record) <= 0)
+                    break;
+                    
+                heap[parent] = heap[child];
+                parent = child;
+            }
+            
+            heap[parent] = temp;
+        } else {
+            heap[0] = heap[--heap_size];
+            
+            if (heap_size > 0) {
+                size_t parent = 0;
+                heap_entry temp = heap[0];
+                size_t child;
+                
+                for (child = 1; child < heap_size; child = 2 * parent + 1) {
+                    if (child + 1 < heap_size && 
+                        compare_index(&heap[child + 1].record, &heap[child].record) < 0)
+                        child++;
+                        
+                    if (compare_index(&temp.record, &heap[child].record) <= 0)
+                        break;
+                        
+                    heap[parent] = heap[child];
+                    parent = child;
+                }
+                
+                heap[parent] = temp;
+            }
+        }
+    }
+    
+    if (result_idx == total_records - 1 && total_records > 0) {
+        index_s last_record = file_header->idx[total_records - 1];
+        size_t correct_pos = 0;
+        
+        while (correct_pos < result_idx && 
+               compare_index(&last_record, &result[correct_pos]) > 0) {
+            correct_pos++;
+        }
+        
+        if (correct_pos < result_idx) {
+            memmove(&result[correct_pos + 1], &result[correct_pos], 
+                   (result_idx - correct_pos) * sizeof(index_s));
+        }
+        
+        result[correct_pos] = last_record;
+        result_idx++;
+    }
+    
+    memcpy(file_header->idx, result, total_records * sizeof(index_s));
+    
+    qsort(file_header->idx, total_records, sizeof(index_s), compare_index);
+    
+    free(result);
+    free(heap);
+    munmap(mapped_data, total_size);
+    close(fd);
+}
+
+int get_next_block(thread_params_t *params) {
+    pthread_mutex_lock(params->map_mutex);
+    for (int i = 0; i < params->num_blocks; ++i) {
+        if (!params->block_map[i]) {
+            params->block_map[i] = 1;
+            pthread_mutex_unlock(params->map_mutex);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(params->map_mutex);
+    return -1;
+}
+
+void *thread_func(void *arg) {
+    thread_params_t *params = (thread_params_t *)arg;
+    pthread_barrier_wait(params->barrier);
+
+    int current_block;
+    while ((current_block = get_next_block(params)) != -1) {
+        size_t offset = current_block * params->block_size;
+        if (offset >= params->buffer_size) 
+            break;
+        
+        size_t remaining = params->buffer_size - offset;
+        size_t block_size = (params->block_size < remaining) ? params->block_size : remaining;
+        size_t num_records = block_size / sizeof(index_s);
+        
+        if (num_records == 0) 
+            continue;
+        
+        index_s *block = (index_s *)(params->buffer + offset);
+        
+        qsort(block, num_records, sizeof(index_s), compare_index);
+        
+        if (offset + block_size >= params->buffer_size) {
+            size_t last_record_index = num_records - 1;
+            if (last_record_index < num_records) {
+                index_s last_record = block[last_record_index];
+                size_t correct_pos = 0;
+                
+                while (correct_pos < last_record_index && 
+                       compare_index(&last_record, &block[correct_pos]) > 0) {
+                    correct_pos++;
+                }
+                
+                if (correct_pos < last_record_index) {
+                    memmove(&block[correct_pos + 1], &block[correct_pos], 
+                           (last_record_index - correct_pos) * sizeof(index_s));
+                    block[correct_pos] = last_record;
+                }
+            }
+        }
+    }
+
+    pthread_barrier_wait(params->barrier);
+
+    while (*(params->merge_blocks_count) > 1) {
+        pthread_mutex_lock(params->map_mutex);
+        int pairs = *(params->merge_blocks_count) / 2;
+        int my_pair = (*params->current_merge_pairs) < pairs ? (*params->current_merge_pairs)++ : -1;
+        pthread_mutex_unlock(params->map_mutex);
+
+        if (my_pair == -1) 
+            break;
+
+        size_t merge_size = *params->merge_block_size;
+        size_t offset1 = my_pair * 2 * merge_size;
+        size_t offset2 = offset1 + merge_size;
+
+        if (offset1 >= params->buffer_size) 
+            continue;
+        
+        size_t size1 = merge_size;
+        if (offset1 + size1 > params->buffer_size) 
+            size1 = params->buffer_size - offset1;
+            
+        size_t size2 = merge_size;
+        if (offset2 >= params->buffer_size) {
+            size2 = 0;
+        } else if (offset2 + size2 > params->buffer_size) {
+            size2 = params->buffer_size - offset2;
+        }
+        
+        size_t records1 = size1 / sizeof(index_s);
+        size_t records2 = size2 / sizeof(index_s);
+        
+        if (records1 == 0 || records2 == 0) 
+            continue;
+
+        index_s *b1 = (index_s *)(params->buffer + offset1);
+        index_s *b2 = (index_s *)(params->buffer + offset2);
+        
+        merge_blocks(b1, b2, records1, records2);
+        
+        if (offset1 + size1 + size2 >= params->buffer_size) {
+            size_t merged_size = records1 + records2;
+            if (merged_size > 0) {
+                qsort(b1, merged_size, sizeof(index_s), compare_index);
+            }
+        }
+    }
+
+    pthread_barrier_wait(params->barrier);
+    return NULL;
 }
