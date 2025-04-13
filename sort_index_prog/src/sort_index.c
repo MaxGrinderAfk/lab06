@@ -64,6 +64,22 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (threads < num_cores || threads > 8 * num_cores) {
+        fprintf(stderr, "threads must be between %d and %d\n", num_cores, 8 * num_cores);
+        exit(EXIT_FAILURE);
+    }
+
+    if (blocks < 4 * threads) {
+        fprintf(stderr, "blocks must be at least 4 times the number of threads (%d)\n", 4 * threads);
+        exit(EXIT_FAILURE);
+    }
+
+    if ((blocks & (blocks - 1)) != 0) {
+        fprintf(stderr, "blocks must be a power of 2\n");
+        exit(EXIT_FAILURE);
+    }
+
     int fd = open(filename, O_RDWR);
     if (fd == -1) {
         perror("open");
@@ -73,6 +89,12 @@ int main(int argc, char *argv[]) {
     struct stat st;
     if (fstat(fd, &st) == -1) {
         perror("fstat");
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    if (st.st_size < memsize) {
+        fprintf(stderr, "file size (%ld) is smaller than requested memory size (%zu)\n", st.st_size, memsize);
         close(fd);
         exit(EXIT_FAILURE);
     }
