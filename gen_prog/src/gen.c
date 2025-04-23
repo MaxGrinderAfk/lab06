@@ -18,22 +18,7 @@ typedef struct {
     index_s idx[];
 } index_hdr_s;
 
-static uint32_t get_yesterday_mjd() {
-    time_t now = time(NULL);
-    now -= 86400;
-    struct tm tm_yesterday;
-    localtime_r(&now, &tm_yesterday);
-
-    int Y = tm_yesterday.tm_year + 1900;
-    int M = tm_yesterday.tm_mon + 1;
-    int D = tm_yesterday.tm_mday;
-
-    int A = (14 - M) / 12;
-    int B = Y + 4800 - A;
-    int C = M + 12*A - 3;
-    double JD = D + (153*C + 2)/5.0 + 365*B + B/4.0 - B/100.0 + B/400.0 - 32045;
-    return (uint32_t)(JD - 2400000.5);
-}
+static uint32_t get_yesterday_mjd();
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
@@ -110,3 +95,19 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
+static uint32_t get_yesterday_mjd() {
+    time_t now = time(NULL);
+    now -= 86400;
+    struct tm tm_yesterday;
+    localtime_r(&now, &tm_yesterday);
+
+    int Y = tm_yesterday.tm_year + 1900;
+    int M = tm_yesterday.tm_mon + 1;
+    int D = tm_yesterday.tm_mday;
+
+    int A = (14 - M) / 12;
+    int B = Y + 4800 - A;
+    int C = M + 12*A - 3;
+    double JD = D + (153*C + 2)/5.0 + 365*B + B/4.0 - B/100.0 + B/400.0 - 32045;
+    return (uint32_t)(JD - 2400000.5);
+}
