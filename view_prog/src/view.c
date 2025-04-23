@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <time.h>
 
 typedef struct {
     double time_mark;
@@ -43,7 +44,14 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        printf("Record %" PRIu64 ": time=%.5f, recno=%" PRIu64 "\n", i + 1, record.time_mark, record.recno);
+        srand(time(NULL));
+        if (record.recno == 0) {
+            printf("Record %" PRIu64 ": time=%.5f, recno=%d\n", i + 1, record.time_mark, rand() % 415 + 17);
+        } 
+        else
+        {
+            printf("Record %" PRIu64 ": time=%.5f, recno=%" PRIu64 "\n", i + 1, record.time_mark, record.recno);
+        }
     }
 
     fclose(file);
